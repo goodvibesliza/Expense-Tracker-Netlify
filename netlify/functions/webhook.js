@@ -1,4 +1,4 @@
-// netlify/functions/webhook.js - Latest Version with Caption Processing
+// netlify/functions/webhook.js - Latest Version with IceDrive Storage
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 
@@ -115,6 +115,66 @@ Your entire response MUST ONLY be a single, valid JSON object. DO NOT include ba
   }
 }
 
+// Save receipt image to IceDrive via WebDAV
+async function saveReceiptToIceDrive(imageBuffer, fileName) {
+  try {
+    console.log('Uploading to IceDrive via WebDAV:', fileName);
+    
+    const webdavUrl = 'https://webdav.icedrive.io';
+    const username = process.env.ICEDRIVE_EMAIL; // Your IceDrive email
+    const password = process.env.ICEDRIVE_ACCESS_KEY; // Your WebDAV access key
+    
+    if (!username || !password) {
+      console.error('IceDrive credentials not configured');
+      return null;
+    }
+    
+    // Create folder structure: /ExpenseReceipts/YYYY/MM/
+    const currentDate = new Date();
+    const year = currentDate.getFullYear();
+    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
+    
+    const folderPath = `/ExpenseReceipts/${year}/${year}-${month}`;
+    
+    // Create directory structure (IceDrive WebDAV auto-creates missing folders)
+    console.log('Creating folder structure:', folderPath);
+    
+    // Generate unique filename
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const uniqueFileName = `receipt-${timestamp}.jpg`;
+    const filePath = `${folderPath}/${uniqueFileName}`;
+    
+    // Upload file via WebDAV PUT request
+    const auth = Buffer.from(`${username}:${password}`).toString('base64');
+    
+    const response = await fetch(`${webdavUrl}${filePath}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'image/jpeg',
+        'Content-Length': imageBuffer.byteLength.toString()
+      },
+      body: imageBuffer
+    });
+    
+    if (response.ok) {
+      // Generate public link (if IceDrive supports public sharing)
+      const publicUrl = `${webdavUrl}${filePath}`;
+      console.log('Receipt uploaded to IceDrive:', publicUrl);
+      return publicUrl;
+    } else {
+      console.error('IceDrive upload failed:', response.status, response.statusText);
+      const errorText = await response.text();
+      console.error('Error details:', errorText);
+      return null;
+    }
+    
+  } catch (error) {
+    console.error('Error uploading to IceDrive:', error);
+    return null;
+  }
+}
+
 // Process receipt with Google Vision OCR and save image
 async function processReceiptOCR(imageBuffer, fileName) {
   try {
@@ -144,137 +204,24 @@ async function processReceiptOCR(imageBuffer, fileName) {
       return { text: null, imageUrl: null };
     }
     
-    // Save image to Google Drive
-    const imageUrl = await saveReceiptToGoogleDrive(buffer, fileName);
+    // Save image to IceDrive
+    const imageUrl = await saveReceiptToIceDrive(buffer, fileName);
     
     // Return the full text detected and image URL
     const fullText = detections[0].description;
     console.log('OCR detected text:', fullText);
-    console.log('Receipt saved to:', imageUrl);
+    
+    if (imageUrl) {
+      console.log('Receipt saved to IceDrive:', imageUrl);
+    } else {
+      console.log('IceDrive upload failed');
+    }
     
     return { text: fullText, imageUrl };
     
   } catch (error) {
     console.error('OCR Error:', error);
     return { text: null, imageUrl: null };
-  }
-}
-
-// Save receipt image to Google Drive
-async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
-  try {
-    console.log('Starting Google Drive upload for:', fileName);
-    
-    const { google } = require('googleapis');
-    
-    // Create authentication
-    const auth = new google.auth.JWT(
-      GOOGLE_CREDENTIALS.client_email,
-      null,
-      GOOGLE_CREDENTIALS.private_key,
-      ['https://www.googleapis.com/auth/drive.file']
-    );
-    
-    console.log('Google Drive auth created');
-    
-    const drive = google.drive({ version: 'v3', auth });
-    
-    // Create folder structure: Expense Receipts/YYYY/MM
-    const currentDate = new Date();
-    const year = currentDate.getFullYear();
-    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
-    
-    console.log('Looking for folder structure...');
-    
-    // Find or create main folder
-    const mainFolderId = await findOrCreateFolder(drive, 'Expense Receipts', 'root');
-    console.log('Main folder ID:', mainFolderId);
-    
-    const yearFolderId = await findOrCreateFolder(drive, year.toString(), mainFolderId);
-    console.log('Year folder ID:', yearFolderId);
-    
-    const monthFolderId = await findOrCreateFolder(drive, `${year}-${month}`, yearFolderId);
-    console.log('Month folder ID:', monthFolderId);
-    
-    // Generate unique filename
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const uniqueFileName = `receipt-${timestamp}-${fileName}`;
-    
-    console.log('Uploading file:', uniqueFileName);
-    
-    // Upload the image
-    const fileMetadata = {
-      name: uniqueFileName,
-      parents: [monthFolderId]
-    };
-    
-    const media = {
-      mimeType: 'image/jpeg',
-      body: require('stream').Readable.from(imageBuffer)
-    };
-    
-    const file = await drive.files.create({
-      resource: fileMetadata,
-      media: media,
-      fields: 'id'
-    });
-    
-    console.log('File uploaded with ID:', file.data.id);
-    
-    // Make file publicly viewable
-    await drive.permissions.create({
-      fileId: file.data.id,
-      resource: {
-        role: 'reader',
-        type: 'anyone'
-      }
-    });
-    
-    console.log('File permissions set to public');
-    
-    // Return the public URL
-    const publicUrl = `https://drive.google.com/file/d/${file.data.id}/view`;
-    console.log('Receipt uploaded to Google Drive:', publicUrl);
-    
-    return publicUrl;
-    
-  } catch (error) {
-    console.error('Error saving to Google Drive:', error);
-    console.error('Error details:', error.message);
-    return null;
-  }
-}
-
-// Helper function to find or create folders
-async function findOrCreateFolder(drive, folderName, parentId) {
-  try {
-    // Search for existing folder
-    const response = await drive.files.list({
-      q: `name='${folderName}' and parents in '${parentId}' and mimeType='application/vnd.google-apps.folder'`,
-      fields: 'files(id, name)'
-    });
-    
-    if (response.data.files.length > 0) {
-      return response.data.files[0].id;
-    }
-    
-    // Create new folder
-    const folderMetadata = {
-      name: folderName,
-      mimeType: 'application/vnd.google-apps.folder',
-      parents: [parentId]
-    };
-    
-    const folder = await drive.files.create({
-      resource: folderMetadata,
-      fields: 'id'
-    });
-    
-    return folder.data.id;
-    
-  } catch (error) {
-    console.error('Error with folder operations:', error);
-    return parentId; // Fallback to parent
   }
 }
 
@@ -625,12 +572,10 @@ exports.handler = async (event, context) => {
         const fileName = `receipt-${largestPhoto.file_id}.jpg`;
         const ocrResult = await processReceiptOCR(imageBuffer, fileName);
         
-        // Fallback: if Google Drive fails, save as base64
+        // Fallback: if IceDrive fails, create a note in spreadsheet
         if (!ocrResult.imageUrl) {
-          console.log('Google Drive failed, using base64 fallback');
-          const base64Image = Buffer.from(imageBuffer).toString('base64');
-          ocrResult.imageUrl = `data:image/jpeg;base64,${base64Image.substring(0, 100)}...`; // Truncated for display
-          ocrResult.base64Data = base64Image; // Full data for storage
+          console.log('IceDrive upload failed, saving note instead');
+          ocrResult.imageUrl = `Receipt saved locally: ${fileName}`;
         }
         
         if (!ocrResult.text) {
@@ -703,10 +648,10 @@ exports.handler = async (event, context) => {
             response += `\n💬 Your notes: "${caption.trim()}" (added to description)`;
           }
           
-          if (ocrResult.imageUrl && ocrResult.imageUrl.startsWith('https://drive.google.com')) {
-            response += `\n📎 Receipt stored: <a href="${ocrResult.imageUrl}">View Original</a>`;
+          if (ocrResult.imageUrl && ocrResult.imageUrl.startsWith('https://webdav.icedrive.io')) {
+            response += `\n📎 Receipt stored: <a href="${ocrResult.imageUrl}">View in IceDrive</a>`;
           } else if (ocrResult.imageUrl) {
-            response += `\n📎 Receipt saved to spreadsheet`;
+            response += `\n📎 Receipt saved to IceDrive`;
           }
           
           response += `\n\n📋 Extracted: ${ocrResult.text.substring(0, 60)}...`;
