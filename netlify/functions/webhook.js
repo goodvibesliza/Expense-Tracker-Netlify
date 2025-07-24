@@ -70,6 +70,7 @@ Special Cases:
 - Payments to son for video editing, maintenance = Contract Labor from Family LLC
 - Venmo payments to son = Contract Labor from Family LLC
 - Rental cars, travel = Travel Expenses, 100% deductible
+- Receipt text: Extract vendor, amount, and categorize based on the receipt content
 
 Expense Description: "${description}"
 
@@ -118,20 +119,23 @@ Your entire response MUST ONLY be a single, valid JSON object. DO NOT include ba
 }
 
 // Add expense to Google Sheet
-async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
+async function addExpenseToSheet(expenseData, sheetName = 'Master Sheet') {
   try {
     console.log(`Attempting to add expense to sheet: ${sheetName}`);
     const doc = await initGoogleSheet();
     
     console.log('Available sheets:', Object.keys(doc.sheetsByTitle));
     
-    let sheet = doc.sheetsByTitle[sheetName];
+    const sheet = doc.sheetsByTitle[sheetName];
     
     if (!sheet) {
       console.error(`Sheet "${sheetName}" not found. Available sheets:`, Object.keys(doc.sheetsByTitle));
-      // Try "Master Sheet" as fallback
-      sheet = doc.sheetsByTitle['Master Sheet'];
-      if (!sheet) {
+      // Try "Sheet1" as fallback
+      const fallbackSheet = doc.sheetsByTitle['Sheet1'];
+      if (fallbackSheet) {
+        console.log('Using Sheet1 as fallback');
+        const sheet = fallbackSheet;
+      } else {
         return { success: false, error: `Sheet "${sheetName}" not found` };
       }
     }
@@ -155,6 +159,20 @@ async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
     
     await sheet.addRow(rowData);
     console.log('Successfully added row to sheet');
+
+    // If it's a Family LLC expense, also add to Family LLC sheet and check YTD
+    if (expenseData.entityType === 'family_llc' && expenseData.businessType !== 'personal') {
+      try {
+        await addExpenseToSheet(expenseData, 'Family LLC');
+        
+        if (expenseData.category === 'Contract Labor') {
+          const ytdTotal = await calculateYTDPayments();
+          return { success: true, ytdTotal };
+        }
+      } catch (familyLLCError) {
+        console.log('Could not add to Family LLC sheet (might not exist):', familyLLCError.message);
+      }
+    }
 
     return { success: true };
   } catch (error) {
@@ -190,6 +208,47 @@ async function calculateYTDPayments() {
   } catch (error) {
     console.error('Error calculating YTD:', error);
     return 0;
+  }
+}
+
+// Process receipt with Google Vision OCR
+async function processReceiptOCR(imageBuffer) {
+  try {
+    // Use Google Vision API for OCR
+    const vision = require('@google-cloud/vision');
+    
+    // Create a client using the same credentials as Google Sheets
+    const client = new vision.ImageAnnotatorClient({
+      credentials: {
+        client_email: GOOGLE_CREDENTIALS.client_email,
+        private_key: GOOGLE_CREDENTIALS.private_key
+      }
+    });
+    
+    // Convert ArrayBuffer to Buffer
+    const buffer = Buffer.from(imageBuffer);
+    
+    // Perform text detection on the image
+    const [result] = await client.textDetection({
+      image: { content: buffer }
+    });
+    
+    const detections = result.textAnnotations;
+    
+    if (!detections || detections.length === 0) {
+      console.log('No text detected in image');
+      return null;
+    }
+    
+    // Return the full text detected
+    const fullText = detections[0].description;
+    console.log('OCR detected text:', fullText);
+    
+    return fullText;
+    
+  } catch (error) {
+    console.error('OCR Error:', error);
+    return null;
   }
 }
 
@@ -256,16 +315,17 @@ exports.handler = async (event, context) => {
     const body = JSON.parse(event.body);
     const { message } = body;
     
-    if (!message || !message.text) {
+    if (!message || (!message.text && !message.photo)) {
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify({ status: 'No message text' })
+        body: JSON.stringify({ status: 'No message text or photo' })
       };
     }
 
     const chatId = message.chat.id.toString();
     const text = message.text;
+    const photo = message.photo;
 
     if (!AUTHORIZED_CHAT_IDS.includes(chatId)) {
       return {
@@ -281,9 +341,11 @@ exports.handler = async (event, context) => {
         `🏢 <b>S-Corp Expense Tracker Ready on Netlify!</b>\n\n` +
         `Send me expense descriptions like:\n` +
         `• "Client lunch at Morton's $85"\n` +
-        `• "Rental car for business trip $353"\n` +
-        `• "Office supplies at Staples $45"\n\n` +
-        `I'll categorize them for S-Corp tax rules!`
+        `• "Family LLC management fee $1100"\n` +
+        `• "Paid son for video editing $200"\n` +
+        `• "Office supplies at Staples $45"\n` +
+        `• "Rental car for business trip $353"\n\n` +
+        `I'll categorize them for S-Corp tax rules and track Family LLC payments!`
       );
       return {
         statusCode: 200,
@@ -308,8 +370,93 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Process expense
-    console.log('Processing expense:', text);
+    // Handle photo receipts
+    if (photo && photo.length > 0) {
+      await sendTelegramMessage(chatId, '📸 Processing your receipt...');
+      
+      try {
+        // Get the largest photo
+        const largestPhoto = photo[photo.length - 1];
+        
+        // Download photo from Telegram
+        const fileResponse = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${largestPhoto.file_id}`);
+        const fileData = await fileResponse.json();
+        
+        if (!fileData.ok) {
+          throw new Error('Could not get file info from Telegram');
+        }
+        
+        const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileData.result.file_path}`;
+        const imageResponse = await fetch(fileUrl);
+        const imageBuffer = await imageResponse.arrayBuffer();
+        
+        // Process with Google Vision OCR
+        const ocrText = await processReceiptOCR(imageBuffer);
+        
+        if (!ocrText) {
+          await sendTelegramMessage(chatId, '❌ Could not extract text from receipt. Please try a clearer photo or enter manually.');
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({ status: 'OCR failed' })
+          };
+        }
+        
+        console.log('OCR extracted text:', ocrText);
+        
+        // Process the extracted text with Claude
+        const expenseData = await processExpenseWithAI(`Receipt text: ${ocrText}`);
+        
+        if (!expenseData) {
+          await sendTelegramMessage(chatId, '❌ Could not categorize the receipt. Please try entering manually.');
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({ status: 'Processing failed' })
+          };
+        }
+        
+        console.log('Receipt expense data processed:', expenseData);
+        
+        const result = await addExpenseToSheet(expenseData);
+        
+        if (result.success) {
+          let response = `📸 <b>Receipt Processed!</b>\n\n` +
+            `💰 Amount: ${expenseData.amount}\n` +
+            `🏪 Vendor: ${expenseData.vendor}\n` +
+            `📂 Category: ${expenseData.category}\n` +
+            `🏢 Entity: ${expenseData.entityType.toUpperCase()}\n` +
+            `📊 Tax Deductible: ${expenseData.deductibilityPercentage}%\n` +
+            `📝 Notes: ${expenseData.taxNotes}\n\n` +
+            `📋 Extracted: ${ocrText.substring(0, 100)}...`;
+
+          await sendTelegramMessage(chatId, response);
+        } else {
+          await sendTelegramMessage(chatId, `❌ Error saving receipt: ${result.error}`);
+        }
+        
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({ status: 'Receipt processed successfully' })
+        };
+        
+      } catch (error) {
+        console.error('Error processing receipt:', error);
+        await sendTelegramMessage(chatId, '❌ Error processing receipt photo. Please try again.');
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({ status: 'Receipt processing error' })
+        };
+      }
+    }
+
+    // Handle text expenses (only if no photo was sent)
+    if (text && !photo) {
+      // Process text expense
+      console.log('Processing text expense:', text);
+      await sendTelegramMessage(chatId, '🤖 Processing your expense...');
     await sendTelegramMessage(chatId, '🤖 Processing your expense...');
     
     const expenseData = await processExpenseWithAI(text);
@@ -336,6 +483,16 @@ exports.handler = async (event, context) => {
         `📊 Tax Deductible: ${expenseData.deductibilityPercentage}%\n` +
         `📝 Notes: ${expenseData.taxNotes}`;
 
+      if (result.ytdTotal !== undefined) {
+        const remaining = STANDARD_DEDUCTION_2025 - result.ytdTotal;
+        response += `\n\n💡 <b>Son's YTD Total:</b> $${result.ytdTotal.toFixed(2)}\n`;
+        response += `Remaining: $${remaining.toFixed(2)}`;
+        
+        if (remaining < 1000) {
+          response += `\n⚠️ <b>Alert:</b> Approaching standard deduction limit!`;
+        }
+      }
+
       await sendTelegramMessage(chatId, response);
     } else {
       await sendTelegramMessage(chatId, `❌ Error saving expense: ${result.error}`);
@@ -345,6 +502,14 @@ exports.handler = async (event, context) => {
       statusCode: 200,
       headers,
       body: JSON.stringify({ status: 'Processed successfully' })
+    };
+    } // End of text processing
+
+    // If we get here, it's neither a command, photo, nor text
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({ status: 'No processable content' })
     };
   } catch (error) {
     console.error('Webhook error:', error);
