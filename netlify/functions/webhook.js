@@ -163,6 +163,8 @@ async function processReceiptOCR(imageBuffer, fileName) {
 // Save receipt image to Google Drive
 async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
   try {
+    console.log('Starting Google Drive upload for:', fileName);
+    
     const { google } = require('googleapis');
     
     // Create authentication
@@ -173,6 +175,8 @@ async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
       ['https://www.googleapis.com/auth/drive.file']
     );
     
+    console.log('Google Drive auth created');
+    
     const drive = google.drive({ version: 'v3', auth });
     
     // Create folder structure: Expense Receipts/YYYY/MM
@@ -180,14 +184,23 @@ async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
     const year = currentDate.getFullYear();
     const month = String(currentDate.getMonth() + 1).padStart(2, '0');
     
+    console.log('Looking for folder structure...');
+    
     // Find or create main folder
     const mainFolderId = await findOrCreateFolder(drive, 'Expense Receipts', 'root');
+    console.log('Main folder ID:', mainFolderId);
+    
     const yearFolderId = await findOrCreateFolder(drive, year.toString(), mainFolderId);
+    console.log('Year folder ID:', yearFolderId);
+    
     const monthFolderId = await findOrCreateFolder(drive, `${year}-${month}`, yearFolderId);
+    console.log('Month folder ID:', monthFolderId);
     
     // Generate unique filename
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const uniqueFileName = `receipt-${timestamp}-${fileName}`;
+    
+    console.log('Uploading file:', uniqueFileName);
     
     // Upload the image
     const fileMetadata = {
@@ -206,6 +219,8 @@ async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
       fields: 'id'
     });
     
+    console.log('File uploaded with ID:', file.data.id);
+    
     // Make file publicly viewable
     await drive.permissions.create({
       fileId: file.data.id,
@@ -215,6 +230,8 @@ async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
       }
     });
     
+    console.log('File permissions set to public');
+    
     // Return the public URL
     const publicUrl = `https://drive.google.com/file/d/${file.data.id}/view`;
     console.log('Receipt uploaded to Google Drive:', publicUrl);
@@ -223,6 +240,7 @@ async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
     
   } catch (error) {
     console.error('Error saving to Google Drive:', error);
+    console.error('Error details:', error.message);
     return null;
   }
 }
@@ -347,7 +365,8 @@ async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
       'Deductible %': expenseData.deductibilityPercentage,
       'Tax Notes': expenseData.taxNotes,
       'Description': expenseData.suggestedDescription,
-      'Work Description': expenseData.workDescription || ''
+      'Work Description': expenseData.workDescription || '',
+      'Receipt URL': expenseData.receiptUrl || ''
     };
     
     console.log('Row data being added to sheet:', rowData);
@@ -606,6 +625,14 @@ exports.handler = async (event, context) => {
         const fileName = `receipt-${largestPhoto.file_id}.jpg`;
         const ocrResult = await processReceiptOCR(imageBuffer, fileName);
         
+        // Fallback: if Google Drive fails, save as base64
+        if (!ocrResult.imageUrl) {
+          console.log('Google Drive failed, using base64 fallback');
+          const base64Image = Buffer.from(imageBuffer).toString('base64');
+          ocrResult.imageUrl = `data:image/jpeg;base64,${base64Image.substring(0, 100)}...`; // Truncated for display
+          ocrResult.base64Data = base64Image; // Full data for storage
+        }
+        
         if (!ocrResult.text) {
           await sendTelegramMessage(chatId, '❌ Could not extract text from receipt. Please try a clearer photo or enter manually.');
           return {
@@ -616,7 +643,7 @@ exports.handler = async (event, context) => {
         }
         
         console.log('OCR extracted text:', ocrResult.text);
-        console.log('Receipt image URL:', ocrResult.imageUrl);
+        console.log('Receipt storage status:', ocrResult.imageUrl ? 'SUCCESS' : 'FAILED');
         console.log('Caption provided:', caption);
         
         // Create the description for Claude - include caption in a clear way
@@ -650,12 +677,13 @@ exports.handler = async (event, context) => {
           console.log('No caption to add or caption is empty');
         }
         
-        // Add receipt image URL to work description
+        // Add receipt image URL to expense data
         if (ocrResult.imageUrl) {
-          const receiptLink = `Receipt: ${ocrResult.imageUrl}`;
-          expenseData.workDescription = expenseData.workDescription 
-            ? `${expenseData.workDescription} | ${receiptLink}` 
-            : receiptLink;
+          expenseData.receiptUrl = ocrResult.imageUrl;
+          console.log('Added receipt URL to expense data:', ocrResult.imageUrl);
+        } else {
+          console.log('No receipt URL available - Google Drive upload may have failed');
+          expenseData.receiptUrl = '';
         }
         
         console.log('Final expense data being saved:', expenseData);
@@ -675,8 +703,10 @@ exports.handler = async (event, context) => {
             response += `\n💬 Your notes: "${caption.trim()}" (added to description)`;
           }
           
-          if (ocrResult.imageUrl) {
+          if (ocrResult.imageUrl && ocrResult.imageUrl.startsWith('https://drive.google.com')) {
             response += `\n📎 Receipt stored: <a href="${ocrResult.imageUrl}">View Original</a>`;
+          } else if (ocrResult.imageUrl) {
+            response += `\n📎 Receipt saved to spreadsheet`;
           }
           
           response += `\n\n📋 Extracted: ${ocrResult.text.substring(0, 60)}...`;
