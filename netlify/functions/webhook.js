@@ -1,4 +1,4 @@
-// netlify/functions/webhook.js - With Photo Processing
+// netlify/functions/webhook.js - Latest Version with Caption Processing
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 
@@ -156,45 +156,6 @@ async function processReceiptOCR(imageBuffer) {
   }
 }
 
-// Add expense to Google Sheet
-async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
-  try {
-    const doc = await initGoogleSheet();
-    
-    let sheet = doc.sheetsByTitle[sheetName];
-    
-    if (!sheet) {
-      sheet = doc.sheetsByTitle['Master Sheet'];
-      if (!sheet) {
-        return { success: false, error: `Sheet "${sheetName}" not found` };
-      }
-    }
-
-    const today = new Date().toISOString().split('T')[0];
-    
-    const rowData = {
-      'Date': today,
-      'Vendor': expenseData.vendor,
-      'Category': expenseData.category,
-      'Amount': expenseData.amount,
-      'Business Type': expenseData.businessType,
-      'Entity': expenseData.entityType,
-      'Deductible %': expenseData.deductibilityPercentage,
-      'Tax Notes': expenseData.taxNotes,
-      'Description': expenseData.suggestedDescription,
-      'Work Description': expenseData.workDescription || ''
-    };
-    
-    console.log('Row data being added to sheet:', rowData);
-    
-    await sheet.addRow(rowData);
-    return { success: true };
-  } catch (error) {
-    console.error('Error adding to sheet:', error);
-    return { success: false, error: error.message };
-  }
-}
-
 // Get recent entries for editing
 async function getRecentEntries(limit = 10) {
   try {
@@ -252,6 +213,45 @@ async function editEntry(entryNumber, field, newValue) {
     return { success: true };
   } catch (error) {
     console.error('Error editing entry:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// Add expense to Google Sheet
+async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
+  try {
+    const doc = await initGoogleSheet();
+    
+    let sheet = doc.sheetsByTitle[sheetName];
+    
+    if (!sheet) {
+      sheet = doc.sheetsByTitle['Master Sheet'];
+      if (!sheet) {
+        return { success: false, error: `Sheet "${sheetName}" not found` };
+      }
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    
+    const rowData = {
+      'Date': today,
+      'Vendor': expenseData.vendor,
+      'Category': expenseData.category,
+      'Amount': expenseData.amount,
+      'Business Type': expenseData.businessType,
+      'Entity': expenseData.entityType,
+      'Deductible %': expenseData.deductibilityPercentage,
+      'Tax Notes': expenseData.taxNotes,
+      'Description': expenseData.suggestedDescription,
+      'Work Description': expenseData.workDescription || ''
+    };
+    
+    console.log('Row data being added to sheet:', rowData);
+    
+    await sheet.addRow(rowData);
+    return { success: true };
+  } catch (error) {
+    console.error('Error adding to sheet:', error);
     return { success: false, error: error.message };
   }
 }
@@ -360,7 +360,8 @@ exports.handler = async (event, context) => {
       hasText: !!message.text,
       textContent: message.text,
       hasPhoto: !!photo,
-      hasCaption: !!message.caption
+      hasCaption: !!message.caption,
+      captionContent: message.caption
     });
 
     if (!AUTHORIZED_CHAT_IDS.includes(chatId)) {
@@ -397,9 +398,9 @@ exports.handler = async (event, context) => {
       const remaining = STANDARD_DEDUCTION_2025 - ytdTotal;
       await sendTelegramMessage(chatId,
         `💰 <b>Son's YTD Payments:</b>\n` +
-        `Paid: ${ytdTotal.toFixed(2)}\n` +
-        `Remaining under std deduction: ${remaining.toFixed(2)}\n` +
-        `Standard deduction limit: ${STANDARD_DEDUCTION_2025}`
+        `Paid: $${ytdTotal.toFixed(2)}\n` +
+        `Remaining under std deduction: $${remaining.toFixed(2)}\n` +
+        `Standard deduction limit: $${STANDARD_DEDUCTION_2025}`
       );
       return {
         statusCode: 200,
@@ -415,7 +416,7 @@ exports.handler = async (event, context) => {
       } else {
         let response = '📋 <b>Recent Expenses:</b>\n\n';
         recentEntries.forEach((entry, index) => {
-          response += `<b>${index + 1}.</b> ${entry.date} - ${entry.vendor} - ${entry.amount}\n`;
+          response += `<b>${index + 1}.</b> ${entry.date} - ${entry.vendor} - $${entry.amount}\n`;
           response += `   📂 ${entry.category} (${entry.deductibilityPercentage}% deductible)\n`;
           response += `   📝 ${entry.description}\n\n`;
         });
@@ -471,7 +472,15 @@ exports.handler = async (event, context) => {
 
     // Handle photo receipts
     if (photo && photo.length > 0) {
-      await sendTelegramMessage(chatId, '📸 Processing your receipt...');
+      const caption = message.caption || '';
+      
+      console.log('Processing photo with caption info:', {
+        hasCaption: !!message.caption,
+        captionText: message.caption,
+        captionLength: message.caption ? message.caption.length : 0
+      });
+      
+      await sendTelegramMessage(chatId, `📸 Processing your receipt${caption ? ' with notes' : ''}...`);
       
       try {
         // Get the largest photo
@@ -502,9 +511,18 @@ exports.handler = async (event, context) => {
         }
         
         console.log('OCR extracted text:', ocrText);
+        console.log('Caption provided:', caption);
         
-        // Process the extracted text with Claude
-        const expenseData = await processExpenseWithAI(`Receipt text: ${ocrText}`);
+        // Create the description for Claude - include caption in a clear way
+        let descriptionForClaude = `Receipt text: ${ocrText}`;
+        if (caption && caption.trim().length > 0) {
+          descriptionForClaude += `\n\nAdditional context: ${caption.trim()}`;
+        }
+        
+        console.log('Combined text for Claude:', descriptionForClaude);
+        
+        // Process with Claude
+        const expenseData = await processExpenseWithAI(descriptionForClaude);
         
         if (!expenseData) {
           await sendTelegramMessage(chatId, '❌ Could not categorize the receipt. Please try entering manually.');
@@ -517,17 +535,33 @@ exports.handler = async (event, context) => {
         
         console.log('Receipt expense data processed:', expenseData);
         
+        // If there was a caption, add it to the description
+        if (caption && caption.trim().length > 0) {
+          console.log('Adding caption to description:', caption);
+          expenseData.suggestedDescription = `${expenseData.suggestedDescription} - ${caption.trim()}`;
+          console.log('Updated description:', expenseData.suggestedDescription);
+        } else {
+          console.log('No caption to add or caption is empty');
+        }
+        
+        console.log('Final expense data being saved:', expenseData);
+        
         const result = await addExpenseToSheet(expenseData);
         
         if (result.success) {
           let response = `📸 <b>Receipt Processed!</b>\n\n` +
-            `💰 Amount: ${expenseData.amount}\n` +
+            `💰 Amount: $${expenseData.amount}\n` +
             `🏪 Vendor: ${expenseData.vendor}\n` +
             `📂 Category: ${expenseData.category}\n` +
             `🏢 Entity: ${expenseData.entityType.toUpperCase()}\n` +
             `📊 Tax Deductible: ${expenseData.deductibilityPercentage}%\n` +
-            `📝 Notes: ${expenseData.taxNotes}\n\n` +
-            `📋 Extracted text preview: ${ocrText.substring(0, 80)}...`;
+            `📝 Notes: ${expenseData.taxNotes}`;
+          
+          if (caption && caption.trim().length > 0) {
+            response += `\n💬 Your notes: "${caption.trim()}" (added to description)`;
+          }
+          
+          response += `\n\n📋 Extracted: ${ocrText.substring(0, 60)}...`;
 
           await sendTelegramMessage(chatId, response);
           console.log('Success message sent to Telegram');
@@ -543,7 +577,7 @@ exports.handler = async (event, context) => {
         
       } catch (error) {
         console.error('Error processing receipt:', error);
-        await sendTelegramMessage(chatId, '❌ Error processing receipt photo. Please try again.');
+        await sendTelegramMessage(chatId, `❌ Error processing receipt photo: ${error.message}`);
         return {
           statusCode: 200,
           headers,
