@@ -350,8 +350,15 @@ exports.handler = async (event, context) => {
     }
 
     const chatId = message.chat.id.toString();
-    const text = message.text;
+    const text = message.text || '';
     const photo = message.photo;
+    
+    console.log('Message received:', {
+      hasText: !!message.text,
+      textContent: message.text,
+      hasPhoto: !!photo,
+      hasCaption: !!message.caption
+    });
 
     if (!AUTHORIZED_CHAT_IDS.includes(chatId)) {
       return {
@@ -543,7 +550,7 @@ exports.handler = async (event, context) => {
     }
 
     // Handle regular text expenses (only if no photo was sent and not a command)
-    if (text && !photo && !text.startsWith('/')) {
+    if (text && typeof text === 'string' && !photo && !text.startsWith('/')) {
       await sendTelegramMessage(chatId, '🤖 Processing your expense...');
       
       const expenseData = await processExpenseWithAI(text);
