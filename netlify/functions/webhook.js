@@ -1,4 +1,4 @@
-// netlify/functions/webhook.js - Fixed Version
+// netlify/functions/webhook.js - With Photo Processing
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 
@@ -110,6 +110,47 @@ Your entire response MUST ONLY be a single, valid JSON object. DO NOT include ba
     return JSON.parse(responseText);
   } catch (error) {
     console.error('Error processing with Claude:', error);
+    return null;
+  }
+}
+
+// Process receipt with Google Vision OCR
+async function processReceiptOCR(imageBuffer) {
+  try {
+    // Use Google Vision API for OCR
+    const vision = require('@google-cloud/vision');
+    
+    // Create a client using the same credentials as Google Sheets
+    const client = new vision.ImageAnnotatorClient({
+      credentials: {
+        client_email: GOOGLE_CREDENTIALS.client_email,
+        private_key: GOOGLE_CREDENTIALS.private_key
+      }
+    });
+    
+    // Convert ArrayBuffer to Buffer
+    const buffer = Buffer.from(imageBuffer);
+    
+    // Perform text detection on the image
+    const [result] = await client.textDetection({
+      image: { content: buffer }
+    });
+    
+    const detections = result.textAnnotations;
+    
+    if (!detections || detections.length === 0) {
+      console.log('No text detected in image');
+      return null;
+    }
+    
+    // Return the full text detected
+    const fullText = detections[0].description;
+    console.log('OCR detected text:', fullText);
+    
+    return fullText;
+    
+  } catch (error) {
+    console.error('OCR Error:', error);
     return null;
   }
 }
@@ -249,6 +290,7 @@ exports.handler = async (event, context) => {
 
     const chatId = message.chat.id.toString();
     const text = message.text;
+    const photo = message.photo;
 
     if (!AUTHORIZED_CHAT_IDS.includes(chatId)) {
       return {
@@ -264,10 +306,11 @@ exports.handler = async (event, context) => {
         `🏢 <b>S-Corp Expense Tracker Ready!</b>\n\n` +
         `💰 <b>Add Expenses:</b>\n` +
         `• Text: "Client lunch $85"\n` +
-        `• Photo: Send receipt images\n\n` +
+        `• Photo: Send receipt images 📸\n\n` +
         `📊 <b>Commands:</b>\n` +
         `• /ytd - Year-to-date totals\n\n` +
-        `I'll categorize everything for S-Corp tax rules!`
+        `I'll categorize everything for S-Corp tax rules!\n\n` +
+        `📸 NEW: Upload receipt photos for automatic OCR processing!`
       );
       return {
         statusCode: 200,
@@ -292,8 +335,90 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Handle regular text expenses
-    if (text && text !== '/start' && text !== '/ytd') {
+    // Handle photo receipts
+    if (photo && photo.length > 0) {
+      await sendTelegramMessage(chatId, '📸 Processing your receipt...');
+      
+      try {
+        // Get the largest photo
+        const largestPhoto = photo[photo.length - 1];
+        
+        // Download photo from Telegram
+        const fileResponse = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${largestPhoto.file_id}`);
+        const fileData = await fileResponse.json();
+        
+        if (!fileData.ok) {
+          throw new Error('Could not get file info from Telegram');
+        }
+        
+        const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileData.result.file_path}`;
+        const imageResponse = await fetch(fileUrl);
+        const imageBuffer = await imageResponse.arrayBuffer();
+        
+        // Process with Google Vision OCR
+        const ocrText = await processReceiptOCR(imageBuffer);
+        
+        if (!ocrText) {
+          await sendTelegramMessage(chatId, '❌ Could not extract text from receipt. Please try a clearer photo or enter manually.');
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({ status: 'OCR failed' })
+          };
+        }
+        
+        console.log('OCR extracted text:', ocrText);
+        
+        // Process the extracted text with Claude
+        const expenseData = await processExpenseWithAI(`Receipt text: ${ocrText}`);
+        
+        if (!expenseData) {
+          await sendTelegramMessage(chatId, '❌ Could not categorize the receipt. Please try entering manually.');
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({ status: 'Processing failed' })
+          };
+        }
+        
+        console.log('Receipt expense data processed:', expenseData);
+        
+        const result = await addExpenseToSheet(expenseData);
+        
+        if (result.success) {
+          let response = `📸 <b>Receipt Processed!</b>\n\n` +
+            `💰 Amount: $${expenseData.amount}\n` +
+            `🏪 Vendor: ${expenseData.vendor}\n` +
+            `📂 Category: ${expenseData.category}\n` +
+            `🏢 Entity: ${expenseData.entityType.toUpperCase()}\n` +
+            `📊 Tax Deductible: ${expenseData.deductibilityPercentage}%\n` +
+            `📝 Notes: ${expenseData.taxNotes}\n\n` +
+            `📋 Extracted: ${ocrText.substring(0, 100)}${ocrText.length > 100 ? '...' : ''}`;
+
+          await sendTelegramMessage(chatId, response);
+        } else {
+          await sendTelegramMessage(chatId, `❌ Error saving receipt: ${result.error}`);
+        }
+        
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({ status: 'Receipt processed successfully' })
+        };
+        
+      } catch (error) {
+        console.error('Error processing receipt:', error);
+        await sendTelegramMessage(chatId, '❌ Error processing receipt photo. Please try again.');
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({ status: 'Receipt processing error' })
+        };
+      }
+    }
+
+    // Handle regular text expenses (only if no photo was sent)
+    if (text && !photo && text !== '/start' && text !== '/ytd') {
       await sendTelegramMessage(chatId, '🤖 Processing your expense...');
       
       const expenseData = await processExpenseWithAI(text);
