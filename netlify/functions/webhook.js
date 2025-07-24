@@ -14,13 +14,8 @@ const GOOGLE_CREDENTIALS = {
   private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n')
 };
 
-// Firebase credentials
-const FIREBASE_CREDENTIALS = {
-  projectId: process.env.FIREBASE_PROJECT_ID,
-  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET
-};
+// Firebase will use the same Google credentials
+const FIREBASE_STORAGE_BUCKET = process.env.FIREBASE_STORAGE_BUCKET;
 
 const STANDARD_DEDUCTION_2025 = 14600;
 
@@ -31,11 +26,11 @@ function initFirebase() {
   if (!firebaseInitialized && !admin.apps.length) {
     admin.initializeApp({
       credential: admin.credential.cert({
-        projectId: FIREBASE_CREDENTIALS.projectId,
-        clientEmail: FIREBASE_CREDENTIALS.clientEmail,
-        privateKey: FIREBASE_CREDENTIALS.privateKey
+        projectId: 'expense-tracker-scorp', // Your Firebase project ID
+        clientEmail: GOOGLE_CREDENTIALS.client_email,
+        privateKey: GOOGLE_CREDENTIALS.private_key
       }),
-      storageBucket: FIREBASE_CREDENTIALS.storageBucket
+      storageBucket: FIREBASE_STORAGE_BUCKET
     });
     firebaseInitialized = true;
     console.log('Firebase initialized successfully');
@@ -168,7 +163,7 @@ async function saveReceiptToFirebase(imageBuffer, fileName) {
     await file.makePublic();
     
     // Get the public URL
-    const publicUrl = `https://storage.googleapis.com/${FIREBASE_CREDENTIALS.storageBucket}/receipts/${fileName}`;
+    const publicUrl = `https://storage.googleapis.com/${FIREBASE_STORAGE_BUCKET}/receipts/${fileName}`;
     
     console.log('✅ Receipt uploaded successfully to Firebase:', publicUrl);
     return publicUrl;
@@ -400,10 +395,7 @@ exports.handler = async (event, context) => {
           hasSheetId: !!SHEET_ID,
           hasGoogleEmail: !!GOOGLE_CREDENTIALS.client_email,
           hasGoogleKey: !!GOOGLE_CREDENTIALS.private_key,
-          hasFirebaseProjectId: !!FIREBASE_CREDENTIALS.projectId,
-          hasFirebaseEmail: !!FIREBASE_CREDENTIALS.clientEmail,
-          hasFirebaseKey: !!FIREBASE_CREDENTIALS.privateKey,
-          hasFirebaseBucket: !!FIREBASE_CREDENTIALS.storageBucket,
+          hasFirebaseBucket: !!FIREBASE_STORAGE_BUCKET,
           authorizedUsers: AUTHORIZED_CHAT_IDS.length
         }
       })
