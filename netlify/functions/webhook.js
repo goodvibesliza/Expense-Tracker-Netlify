@@ -71,6 +71,7 @@ Special Cases:
 - Venmo payments to son = Contract Labor from Family LLC
 - Rental cars, travel = Travel Expenses, 100% deductible
 - Receipt text: Extract vendor, amount, and categorize based on the receipt content
+- Additional context: Include any additional context or notes provided in the workDescription field
 
 Expense Description: "${description}"
 
@@ -183,6 +184,8 @@ async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
       'Description': expenseData.suggestedDescription,
       'Work Description': expenseData.workDescription || ''
     };
+    
+    console.log('Row data being added to sheet:', rowData);
     
     await sheet.addRow(rowData);
     return { success: true };
