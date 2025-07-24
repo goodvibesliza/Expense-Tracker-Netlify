@@ -192,6 +192,67 @@ async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
   }
 }
 
+// Get recent entries for editing
+async function getRecentEntries(limit = 10) {
+  try {
+    const doc = await initGoogleSheet();
+    let sheet = doc.sheetsByTitle['Sheet1'] || doc.sheetsByTitle['Master Sheet'];
+    
+    if (!sheet) {
+      return [];
+    }
+    
+    const rows = await sheet.getRows();
+    const recentRows = rows.slice(-limit).reverse();
+    
+    return recentRows.map((row, index) => ({
+      date: row.get('Date'),
+      vendor: row.get('Vendor'),
+      category: row.get('Category'),
+      amount: row.get('Amount'),
+      deductibilityPercentage: row.get('Deductible %'),
+      description: row.get('Description')
+    }));
+  } catch (error) {
+    console.error('Error getting recent entries:', error);
+    return [];
+  }
+}
+
+// Edit an entry
+async function editEntry(entryNumber, field, newValue) {
+  try {
+    const doc = await initGoogleSheet();
+    let sheet = doc.sheetsByTitle['Sheet1'] || doc.sheetsByTitle['Master Sheet'];
+    
+    if (!sheet) {
+      return { success: false, error: 'Sheet not found' };
+    }
+    
+    const rows = await sheet.getRows();
+    
+    if (entryNumber < 1 || entryNumber > rows.length) {
+      return { success: false, error: `Entry #${entryNumber} not found. Use /recent to see available entries.` };
+    }
+    
+    const row = rows[entryNumber - 1];
+    
+    if (field === 'description') {
+      row.set('Description', newValue);
+    } else if (field === 'notes') {
+      const existingNotes = row.get('Work Description') || '';
+      const updatedNotes = existingNotes ? `${existingNotes} | ${newValue}` : newValue;
+      row.set('Work Description', updatedNotes);
+    }
+    
+    await row.save();
+    return { success: true };
+  } catch (error) {
+    console.error('Error editing entry:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // Calculate YTD payments to son
 async function calculateYTDPayments() {
   try {
@@ -307,10 +368,12 @@ exports.handler = async (event, context) => {
         `💰 <b>Add Expenses:</b>\n` +
         `• Text: "Client lunch $85"\n` +
         `• Photo: Send receipt images 📸\n\n` +
-        `📊 <b>Commands:</b>\n` +
+        `📊 <b>View & Edit:</b>\n` +
+        `• /recent - View recent expenses\n` +
+        `• /edit [#] [new description] - Edit entry\n` +
+        `• /note [#] [additional notes] - Add notes\n` +
         `• /ytd - Year-to-date totals\n\n` +
-        `I'll categorize everything for S-Corp tax rules!\n\n` +
-        `📸 NEW: Upload receipt photos for automatic OCR processing!`
+        `I'll categorize everything for S-Corp tax rules!`
       );
       return {
         statusCode: 200,
@@ -324,15 +387,76 @@ exports.handler = async (event, context) => {
       const remaining = STANDARD_DEDUCTION_2025 - ytdTotal;
       await sendTelegramMessage(chatId,
         `💰 <b>Son's YTD Payments:</b>\n` +
-        `Paid: $${ytdTotal.toFixed(2)}\n` +
-        `Remaining under std deduction: $${remaining.toFixed(2)}\n` +
-        `Standard deduction limit: $${STANDARD_DEDUCTION_2025}`
+        `Paid: ${ytdTotal.toFixed(2)}\n` +
+        `Remaining under std deduction: ${remaining.toFixed(2)}\n` +
+        `Standard deduction limit: ${STANDARD_DEDUCTION_2025}`
       );
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({ status: 'YTD message sent' })
       };
+    }
+
+    if (text === '/recent') {
+      const recentEntries = await getRecentEntries();
+      if (recentEntries.length === 0) {
+        await sendTelegramMessage(chatId, '📋 No recent entries found.');
+      } else {
+        let response = '📋 <b>Recent Expenses:</b>\n\n';
+        recentEntries.forEach((entry, index) => {
+          response += `<b>${index + 1}.</b> ${entry.date} - ${entry.vendor} - ${entry.amount}\n`;
+          response += `   📂 ${entry.category} (${entry.deductibilityPercentage}% deductible)\n`;
+          response += `   📝 ${entry.description}\n\n`;
+        });
+        response += `💡 Use /edit [#] or /note [#] to modify entries`;
+        await sendTelegramMessage(chatId, response);
+      }
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ status: 'Recent entries sent' })
+      };
+    }
+
+    // Handle edit commands
+    if (text.startsWith('/edit ')) {
+      const parts = text.split(' ');
+      const entryNumber = parseInt(parts[1]);
+      const newDescription = parts.slice(2).join(' ');
+      
+      if (!entryNumber || !newDescription) {
+        await sendTelegramMessage(chatId, '❌ Usage: /edit [number] [new description]\nExample: /edit 3 Updated expense description');
+        return { statusCode: 200, headers, body: JSON.stringify({ status: 'Invalid edit command' }) };
+      }
+
+      const result = await editEntry(entryNumber, 'description', newDescription);
+      if (result.success) {
+        await sendTelegramMessage(chatId, `✅ Updated entry #${entryNumber} description`);
+      } else {
+        await sendTelegramMessage(chatId, `❌ ${result.error}`);
+      }
+      return { statusCode: 200, headers, body: JSON.stringify({ status: 'Edit processed' }) };
+    }
+
+    // Handle note commands
+    if (text.startsWith('/note ')) {
+      const parts = text.split(' ');
+      const entryNumber = parseInt(parts[1]);
+      const additionalNotes = parts.slice(2).join(' ');
+      
+      if (!entryNumber || !additionalNotes) {
+        await sendTelegramMessage(chatId, '❌ Usage: /note [number] [additional notes]\nExample: /note 3 This was for the client meeting');
+        return { statusCode: 200, headers, body: JSON.stringify({ status: 'Invalid note command' }) };
+      }
+
+      const result = await editEntry(entryNumber, 'notes', additionalNotes);
+      if (result.success) {
+        await sendTelegramMessage(chatId, `✅ Added note to entry #${entryNumber}`);
+      } else {
+        await sendTelegramMessage(chatId, `❌ ${result.error}`);
+      }
+      return { statusCode: 200, headers, body: JSON.stringify({ status: 'Note processed' }) };
     }
 
     // Handle photo receipts
@@ -387,15 +511,16 @@ exports.handler = async (event, context) => {
         
         if (result.success) {
           let response = `📸 <b>Receipt Processed!</b>\n\n` +
-            `💰 Amount: $${expenseData.amount}\n` +
+            `💰 Amount: ${expenseData.amount}\n` +
             `🏪 Vendor: ${expenseData.vendor}\n` +
             `📂 Category: ${expenseData.category}\n` +
             `🏢 Entity: ${expenseData.entityType.toUpperCase()}\n` +
             `📊 Tax Deductible: ${expenseData.deductibilityPercentage}%\n` +
             `📝 Notes: ${expenseData.taxNotes}\n\n` +
-            `📋 Extracted: ${ocrText.substring(0, 100)}${ocrText.length > 100 ? '...' : ''}`;
+            `📋 Extracted text preview: ${ocrText.substring(0, 80)}...`;
 
           await sendTelegramMessage(chatId, response);
+          console.log('Success message sent to Telegram');
         } else {
           await sendTelegramMessage(chatId, `❌ Error saving receipt: ${result.error}`);
         }
@@ -417,8 +542,8 @@ exports.handler = async (event, context) => {
       }
     }
 
-    // Handle regular text expenses (only if no photo was sent)
-    if (text && !photo && text !== '/start' && text !== '/ytd') {
+    // Handle regular text expenses (only if no photo was sent and not a command)
+    if (text && !photo && !text.startsWith('/')) {
       await sendTelegramMessage(chatId, '🤖 Processing your expense...');
       
       const expenseData = await processExpenseWithAI(text);
