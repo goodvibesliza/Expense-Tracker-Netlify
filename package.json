@@ -1,7 +1,7 @@
 {
   "name": "scorp-expense-tracker-netlify",
   "version": "1.0.0",
-  "description": "AI-powered S-Corp expense tracker with Telegram integration on Netlify",
+  "description": "AI-powered S-Corp expense tracker with Telegram integration and IceDrive storage",
   "main": "netlify/functions/webhook.js",
   "scripts": {
     "dev": "netlify dev",
@@ -10,8 +10,7 @@
   "dependencies": {
     "google-spreadsheet": "^4.1.2",
     "google-auth-library": "^9.4.1",
-    "@google-cloud/vision": "^4.0.2",
-    "googleapis": "^126.0.1"
+    "@google-cloud/vision": "^4.0.2"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -22,7 +21,8 @@
     "ai",
     "scorp",
     "tax",
-    "netlify"
+    "netlify",
+    "icedrive"
   ],
   "author": "Liza Deen",
   "license": "MIT"
