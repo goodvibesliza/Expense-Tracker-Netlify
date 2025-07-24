@@ -115,8 +115,8 @@ Your entire response MUST ONLY be a single, valid JSON object. DO NOT include ba
   }
 }
 
-// Process receipt with Google Vision OCR
-async function processReceiptOCR(imageBuffer) {
+// Process receipt with Google Vision OCR and save image
+async function processReceiptOCR(imageBuffer, fileName) {
   try {
     // Use Google Vision API for OCR
     const vision = require('@google-cloud/vision');
@@ -141,18 +141,122 @@ async function processReceiptOCR(imageBuffer) {
     
     if (!detections || detections.length === 0) {
       console.log('No text detected in image');
-      return null;
+      return { text: null, imageUrl: null };
     }
     
-    // Return the full text detected
+    // Save image to Google Drive
+    const imageUrl = await saveReceiptToGoogleDrive(buffer, fileName);
+    
+    // Return the full text detected and image URL
     const fullText = detections[0].description;
     console.log('OCR detected text:', fullText);
+    console.log('Receipt saved to:', imageUrl);
     
-    return fullText;
+    return { text: fullText, imageUrl };
     
   } catch (error) {
     console.error('OCR Error:', error);
+    return { text: null, imageUrl: null };
+  }
+}
+
+// Save receipt image to Google Drive
+async function saveReceiptToGoogleDrive(imageBuffer, fileName) {
+  try {
+    const { google } = require('googleapis');
+    
+    // Create authentication
+    const auth = new google.auth.JWT(
+      GOOGLE_CREDENTIALS.client_email,
+      null,
+      GOOGLE_CREDENTIALS.private_key,
+      ['https://www.googleapis.com/auth/drive.file']
+    );
+    
+    const drive = google.drive({ version: 'v3', auth });
+    
+    // Create folder structure: Expense Receipts/YYYY/MM
+    const currentDate = new Date();
+    const year = currentDate.getFullYear();
+    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
+    
+    // Find or create main folder
+    const mainFolderId = await findOrCreateFolder(drive, 'Expense Receipts', 'root');
+    const yearFolderId = await findOrCreateFolder(drive, year.toString(), mainFolderId);
+    const monthFolderId = await findOrCreateFolder(drive, `${year}-${month}`, yearFolderId);
+    
+    // Generate unique filename
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const uniqueFileName = `receipt-${timestamp}-${fileName}`;
+    
+    // Upload the image
+    const fileMetadata = {
+      name: uniqueFileName,
+      parents: [monthFolderId]
+    };
+    
+    const media = {
+      mimeType: 'image/jpeg',
+      body: require('stream').Readable.from(imageBuffer)
+    };
+    
+    const file = await drive.files.create({
+      resource: fileMetadata,
+      media: media,
+      fields: 'id'
+    });
+    
+    // Make file publicly viewable
+    await drive.permissions.create({
+      fileId: file.data.id,
+      resource: {
+        role: 'reader',
+        type: 'anyone'
+      }
+    });
+    
+    // Return the public URL
+    const publicUrl = `https://drive.google.com/file/d/${file.data.id}/view`;
+    console.log('Receipt uploaded to Google Drive:', publicUrl);
+    
+    return publicUrl;
+    
+  } catch (error) {
+    console.error('Error saving to Google Drive:', error);
     return null;
+  }
+}
+
+// Helper function to find or create folders
+async function findOrCreateFolder(drive, folderName, parentId) {
+  try {
+    // Search for existing folder
+    const response = await drive.files.list({
+      q: `name='${folderName}' and parents in '${parentId}' and mimeType='application/vnd.google-apps.folder'`,
+      fields: 'files(id, name)'
+    });
+    
+    if (response.data.files.length > 0) {
+      return response.data.files[0].id;
+    }
+    
+    // Create new folder
+    const folderMetadata = {
+      name: folderName,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [parentId]
+    };
+    
+    const folder = await drive.files.create({
+      resource: folderMetadata,
+      fields: 'id'
+    });
+    
+    return folder.data.id;
+    
+  } catch (error) {
+    console.error('Error with folder operations:', error);
+    return parentId; // Fallback to parent
   }
 }
 
@@ -498,10 +602,11 @@ exports.handler = async (event, context) => {
         const imageResponse = await fetch(fileUrl);
         const imageBuffer = await imageResponse.arrayBuffer();
         
-        // Process with Google Vision OCR
-        const ocrText = await processReceiptOCR(imageBuffer);
+        // Process with Google Vision OCR and save image
+        const fileName = `receipt-${largestPhoto.file_id}.jpg`;
+        const ocrResult = await processReceiptOCR(imageBuffer, fileName);
         
-        if (!ocrText) {
+        if (!ocrResult.text) {
           await sendTelegramMessage(chatId, '❌ Could not extract text from receipt. Please try a clearer photo or enter manually.');
           return {
             statusCode: 200,
@@ -510,11 +615,12 @@ exports.handler = async (event, context) => {
           };
         }
         
-        console.log('OCR extracted text:', ocrText);
+        console.log('OCR extracted text:', ocrResult.text);
+        console.log('Receipt image URL:', ocrResult.imageUrl);
         console.log('Caption provided:', caption);
         
         // Create the description for Claude - include caption in a clear way
-        let descriptionForClaude = `Receipt text: ${ocrText}`;
+        let descriptionForClaude = `Receipt text: ${ocrResult.text}`;
         if (caption && caption.trim().length > 0) {
           descriptionForClaude += `\n\nAdditional context: ${caption.trim()}`;
         }
@@ -544,13 +650,21 @@ exports.handler = async (event, context) => {
           console.log('No caption to add or caption is empty');
         }
         
+        // Add receipt image URL to work description
+        if (ocrResult.imageUrl) {
+          const receiptLink = `Receipt: ${ocrResult.imageUrl}`;
+          expenseData.workDescription = expenseData.workDescription 
+            ? `${expenseData.workDescription} | ${receiptLink}` 
+            : receiptLink;
+        }
+        
         console.log('Final expense data being saved:', expenseData);
         
         const result = await addExpenseToSheet(expenseData);
         
         if (result.success) {
           let response = `📸 <b>Receipt Processed!</b>\n\n` +
-            `💰 Amount: $${expenseData.amount}\n` +
+            `💰 Amount: ${expenseData.amount}\n` +
             `🏪 Vendor: ${expenseData.vendor}\n` +
             `📂 Category: ${expenseData.category}\n` +
             `🏢 Entity: ${expenseData.entityType.toUpperCase()}\n` +
@@ -561,7 +675,11 @@ exports.handler = async (event, context) => {
             response += `\n💬 Your notes: "${caption.trim()}" (added to description)`;
           }
           
-          response += `\n\n📋 Extracted: ${ocrText.substring(0, 60)}...`;
+          if (ocrResult.imageUrl) {
+            response += `\n📎 Receipt stored: <a href="${ocrResult.imageUrl}">View Original</a>`;
+          }
+          
+          response += `\n\n📋 Extracted: ${ocrResult.text.substring(0, 60)}...`;
 
           await sendTelegramMessage(chatId, response);
           console.log('Success message sent to Telegram');
