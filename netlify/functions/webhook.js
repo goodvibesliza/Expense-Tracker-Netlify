@@ -1,4 +1,4 @@
-// netlify/functions/webhook.js - Netlify Function
+// netlify/functions/webhook.js - Netlify Function with Photo Processing
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 
@@ -118,99 +118,6 @@ Your entire response MUST ONLY be a single, valid JSON object. DO NOT include ba
   }
 }
 
-// Add expense to Google Sheet
-async function addExpenseToSheet(expenseData, sheetName = 'Master Sheet') {
-  try {
-    console.log(`Attempting to add expense to sheet: ${sheetName}`);
-    const doc = await initGoogleSheet();
-    
-    console.log('Available sheets:', Object.keys(doc.sheetsByTitle));
-    
-    const sheet = doc.sheetsByTitle[sheetName];
-    
-    if (!sheet) {
-      console.error(`Sheet "${sheetName}" not found. Available sheets:`, Object.keys(doc.sheetsByTitle));
-      // Try "Sheet1" as fallback
-      const fallbackSheet = doc.sheetsByTitle['Sheet1'];
-      if (fallbackSheet) {
-        console.log('Using Sheet1 as fallback');
-        const sheet = fallbackSheet;
-      } else {
-        return { success: false, error: `Sheet "${sheetName}" not found` };
-      }
-    }
-
-    const today = new Date().toISOString().split('T')[0];
-    
-    const rowData = {
-      'Date': today,
-      'Vendor': expenseData.vendor,
-      'Category': expenseData.category,
-      'Amount': expenseData.amount,
-      'Business Type': expenseData.businessType,
-      'Entity': expenseData.entityType,
-      'Deductible %': expenseData.deductibilityPercentage,
-      'Tax Notes': expenseData.taxNotes,
-      'Description': expenseData.suggestedDescription,
-      'Work Description': expenseData.workDescription || ''
-    };
-    
-    console.log('Adding row data:', rowData);
-    
-    await sheet.addRow(rowData);
-    console.log('Successfully added row to sheet');
-
-    // If it's a Family LLC expense, also add to Family LLC sheet and check YTD
-    if (expenseData.entityType === 'family_llc' && expenseData.businessType !== 'personal') {
-      try {
-        await addExpenseToSheet(expenseData, 'Family LLC');
-        
-        if (expenseData.category === 'Contract Labor') {
-          const ytdTotal = await calculateYTDPayments();
-          return { success: true, ytdTotal };
-        }
-      } catch (familyLLCError) {
-        console.log('Could not add to Family LLC sheet (might not exist):', familyLLCError.message);
-      }
-    }
-
-    return { success: true };
-  } catch (error) {
-    console.error('Error adding to sheet:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-// Calculate YTD payments to son
-async function calculateYTDPayments() {
-  try {
-    const doc = await initGoogleSheet();
-    const sheet = doc.sheetsByTitle['Family LLC'];
-    
-    if (!sheet) {
-      console.log('Family LLC sheet not found, returning 0');
-      return 0;
-    }
-    
-    const rows = await sheet.getRows();
-    
-    const currentYear = new Date().getFullYear();
-    let ytdTotal = 0;
-    
-    rows.forEach(row => {
-      const rowYear = new Date(row.get('Date')).getFullYear();
-      if (rowYear === currentYear && row.get('Category') === 'Contract Labor') {
-        ytdTotal += parseFloat(row.get('Amount')) || 0;
-      }
-    });
-    
-    return ytdTotal;
-  } catch (error) {
-    console.error('Error calculating YTD:', error);
-    return 0;
-  }
-}
-
 // Process receipt with Google Vision OCR
 async function processReceiptOCR(imageBuffer) {
   try {
@@ -249,6 +156,82 @@ async function processReceiptOCR(imageBuffer) {
   } catch (error) {
     console.error('OCR Error:', error);
     return null;
+  }
+}
+
+// Add expense to Google Sheet
+async function addExpenseToSheet(expenseData, sheetName = 'Sheet1') {
+  try {
+    console.log(`Attempting to add expense to sheet: ${sheetName}`);
+    const doc = await initGoogleSheet();
+    
+    console.log('Available sheets:', Object.keys(doc.sheetsByTitle));
+    
+    let sheet = doc.sheetsByTitle[sheetName];
+    
+    if (!sheet) {
+      console.error(`Sheet "${sheetName}" not found. Available sheets:`, Object.keys(doc.sheetsByTitle));
+      // Try "Master Sheet" as fallback
+      sheet = doc.sheetsByTitle['Master Sheet'];
+      if (!sheet) {
+        return { success: false, error: `Sheet "${sheetName}" not found` };
+      }
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    
+    const rowData = {
+      'Date': today,
+      'Vendor': expenseData.vendor,
+      'Category': expenseData.category,
+      'Amount': expenseData.amount,
+      'Business Type': expenseData.businessType,
+      'Entity': expenseData.entityType,
+      'Deductible %': expenseData.deductibilityPercentage,
+      'Tax Notes': expenseData.taxNotes,
+      'Description': expenseData.suggestedDescription,
+      'Work Description': expenseData.workDescription || ''
+    };
+    
+    console.log('Adding row data:', rowData);
+    
+    await sheet.addRow(rowData);
+    console.log('Successfully added row to sheet');
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error adding to sheet:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// Calculate YTD payments to son
+async function calculateYTDPayments() {
+  try {
+    const doc = await initGoogleSheet();
+    const sheet = doc.sheetsByTitle['Family LLC'];
+    
+    if (!sheet) {
+      console.log('Family LLC sheet not found, returning 0');
+      return 0;
+    }
+    
+    const rows = await sheet.getRows();
+    
+    const currentYear = new Date().getFullYear();
+    let ytdTotal = 0;
+    
+    rows.forEach(row => {
+      const rowYear = new Date(row.get('Date')).getFullYear();
+      if (rowYear === currentYear && row.get('Category') === 'Contract Labor') {
+        ytdTotal += parseFloat(row.get('Amount')) || 0;
+      }
+    });
+    
+    return ytdTotal;
+  } catch (error) {
+    console.error('Error calculating YTD:', error);
+    return 0;
   }
 }
 
@@ -341,11 +324,10 @@ exports.handler = async (event, context) => {
         `🏢 <b>S-Corp Expense Tracker Ready on Netlify!</b>\n\n` +
         `Send me expense descriptions like:\n` +
         `• "Client lunch at Morton's $85"\n` +
-        `• "Family LLC management fee $1100"\n` +
-        `• "Paid son for video editing $200"\n` +
-        `• "Office supplies at Staples $45"\n` +
-        `• "Rental car for business trip $353"\n\n` +
-        `I'll categorize them for S-Corp tax rules and track Family LLC payments!`
+        `• "Rental car for business trip $353"\n` +
+        `• "Office supplies at Staples $45"\n\n` +
+        `📸 <b>NEW:</b> Send receipt photos for automatic processing!\n\n` +
+        `I'll categorize everything for S-Corp tax rules!`
       );
       return {
         statusCode: 200,
@@ -422,7 +404,7 @@ exports.handler = async (event, context) => {
         
         if (result.success) {
           let response = `📸 <b>Receipt Processed!</b>\n\n` +
-            `💰 Amount: ${expenseData.amount}\n` +
+            `💰 Amount: $${expenseData.amount}\n` +
             `🏪 Vendor: ${expenseData.vendor}\n` +
             `📂 Category: ${expenseData.category}\n` +
             `🏢 Entity: ${expenseData.entityType.toUpperCase()}\n` +
@@ -457,7 +439,6 @@ exports.handler = async (event, context) => {
       // Process text expense
       console.log('Processing text expense:', text);
       await sendTelegramMessage(chatId, '🤖 Processing your expense...');
-    await sendTelegramMessage(chatId, '🤖 Processing your expense...');
     
     const expenseData = await processExpenseWithAI(text);
     
@@ -482,16 +463,6 @@ exports.handler = async (event, context) => {
         `🏢 Entity: ${expenseData.entityType.toUpperCase()}\n` +
         `📊 Tax Deductible: ${expenseData.deductibilityPercentage}%\n` +
         `📝 Notes: ${expenseData.taxNotes}`;
-
-      if (result.ytdTotal !== undefined) {
-        const remaining = STANDARD_DEDUCTION_2025 - result.ytdTotal;
-        response += `\n\n💡 <b>Son's YTD Total:</b> $${result.ytdTotal.toFixed(2)}\n`;
-        response += `Remaining: $${remaining.toFixed(2)}`;
-        
-        if (remaining < 1000) {
-          response += `\n⚠️ <b>Alert:</b> Approaching standard deduction limit!`;
-        }
-      }
 
       await sendTelegramMessage(chatId, response);
     } else {
