@@ -1,0 +1,27 @@
+{
+  "name": "scorp-expense-tracker-netlify",
+  "version": "1.0.0",
+  "description": "AI-powered S-Corp expense tracker with Telegram integration on Netlify",
+  "main": "netlify/functions/webhook.js",
+  "scripts": {
+    "dev": "netlify dev",
+    "build": "echo 'No build step needed'"
+  },
+  "dependencies": {
+    "google-spreadsheet": "^4.1.2",
+    "google-auth-library": "^9.4.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "telegram",
+    "expense-tracker",
+    "ai",
+    "scorp",
+    "tax",
+    "netlify"
+  ],
+  "author": "Liza Deen",
+  "license": "MIT"
+}
