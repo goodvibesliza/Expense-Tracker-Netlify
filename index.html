@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S-Corp Expense Tracker - Netlify</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            text-align: center;
+        }
+        .container {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 20px;
+        }
+        .status {
+            font-size: 1.5em;
+            margin: 30px 0;
+            color: #34d399;
+        }
+        .info {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: left;
+        }
+        .webhook-url {
+            background: rgba(0,0,0,0.3);
+            padding: 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            margin: 15px 0;
+            word-break: break-all;
+        }
+        .button {
+            display: inline-block;
+            background: #34d399;
+            color: white;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 8px;
+            margin: 10px;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+        }
+        .button:hover {
+            background: #10b981;
+        }
+        .netlify-badge {
+            background: #00ad9f;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏢 S-Corp Expense Tracker</h1>
+        <div class="netlify-badge">Powered by Netlify ⚡</div>
+        <div class="status">✅ System Running!</div>
+        
+        <div class="info">
+            <h3>📱 Telegram Bot Setup</h3>
+            <p>Your webhook URL is:</p>
+            <div class="webhook-url" id="webhookUrl">Loading...</div>
+            
+            <h4>🔗 Set Your Webhook:</h4>
+            <p>Click the button below and enter your bot token:</p>
+            <button class="button" onclick="setWebhook()">Set Telegram Webhook</button>
+            
+            <h4>🧪 Test API:</h4>
+            <button class="button" onclick="testAPI()">Test API Connection</button>
+            <div id="apiResult" style="margin-top: 10px;"></div>
+        </div>
+
+        <div class="info">
+            <h3>💬 How to Use:</h3>
+            <ul style="text-align: left;">
+                <li>Start a chat with your Telegram bot</li>
+                <li>Send: <code>/start</code> to get started</li>
+                <li>Send expenses like: "Client lunch $85"</li>
+                <li>Send expenses like: "Rental car $353"</li>
+                <li>Send: <code>/ytd</code> to check year-to-date totals</li>
+            </ul>
+        </div>
+
+        <div class="info">
+            <h3>📊 Features:</h3>
+            <ul style="text-align: left;">
+                <li>✅ AI-powered S-Corp tax categorization</li>
+                <li>✅ Family LLC payment tracking</li>
+                <li>✅ Standard deduction monitoring</li>
+                <li>✅ Google Sheets integration</li>
+                <li>✅ Multiple user support</li>
+                <li>✅ Netlify serverless hosting</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        // Set the webhook URL dynamically
+        const webhookUrl = window.location.origin + '/.netlify/functions/webhook';
+        document.getElementById('webhookUrl').textContent = webhookUrl;
+        
+        // Set webhook function
+        function setWebhook() {
+            const token = prompt('Enter your Telegram bot token:');
+            if (token) {
+                const url = `https://api.telegram.org/bot${token}/setWebhook?url=${webhookUrl}`;
+                window.open(url, '_blank');
+            }
+        }
+
+        // Test API function
+        async function testAPI() {
+            const resultDiv = document.getElementById('apiResult');
+            resultDiv.innerHTML = '🔄 Testing...';
+            
+            try {
+                const response = await fetch('/.netlify/functions/webhook');
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `
+                        <div style="background: rgba(34, 197, 94, 0.2); padding: 10px; border-radius: 5px; margin-top: 10px;">
+                            ✅ API Working!<br>
+                            <small>${JSON.stringify(data.envCheck, null, 2)}</small>
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div style="background: rgba(239, 68, 68, 0.2); padding: 10px; border-radius: 5px; margin-top: 10px;">
+                            ❌ API Error: ${response.status}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div style="background: rgba(239, 68, 68, 0.2); padding: 10px; border-radius: 5px; margin-top: 10px;">
+                        ❌ Connection Error: ${error.message}
+                    </div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>
