@@ -115,68 +115,32 @@ Your entire response MUST ONLY be a single, valid JSON object. DO NOT include ba
   }
 }
 
-// Save receipt image to IceDrive via WebDAV
-async function saveReceiptToIceDrive(imageBuffer, fileName) {
+// Save receipt using Telegram file URL (simpler and reliable)
+async function saveReceiptToTelegram(largestPhoto) {
   try {
-    console.log('Uploading to IceDrive via WebDAV:', fileName);
+    console.log('Getting Telegram file URL for:', largestPhoto.file_id);
     
-    const webdavUrl = 'https://webdav.icedrive.io';
-    const username = process.env.ICEDRIVE_EMAIL; // Your IceDrive email
-    const password = process.env.ICEDRIVE_ACCESS_KEY; // Your WebDAV access key
+    // Get file info from Telegram
+    const fileResponse = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${largestPhoto.file_id}`);
+    const fileData = await fileResponse.json();
     
-    if (!username || !password) {
-      console.error('IceDrive credentials not configured');
-      return null;
-    }
-    
-    // Create folder structure: /ExpenseReceipts/YYYY/MM/
-    const currentDate = new Date();
-    const year = currentDate.getFullYear();
-    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
-    
-    const folderPath = `/ExpenseReceipts/${year}/${year}-${month}`;
-    
-    // Create directory structure (IceDrive WebDAV auto-creates missing folders)
-    console.log('Creating folder structure:', folderPath);
-    
-    // Generate unique filename
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const uniqueFileName = `receipt-${timestamp}.jpg`;
-    const filePath = `${folderPath}/${uniqueFileName}`;
-    
-    // Upload file via WebDAV PUT request
-    const auth = Buffer.from(`${username}:${password}`).toString('base64');
-    
-    const response = await fetch(`${webdavUrl}${filePath}`, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'image/jpeg',
-        'Content-Length': imageBuffer.byteLength.toString()
-      },
-      body: imageBuffer
-    });
-    
-    if (response.ok) {
-      // Generate public link (if IceDrive supports public sharing)
-      const publicUrl = `${webdavUrl}${filePath}`;
-      console.log('Receipt uploaded to IceDrive:', publicUrl);
-      return publicUrl;
+    if (fileData.ok) {
+      const telegramFileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileData.result.file_path}`;
+      console.log('✅ Receipt available at Telegram URL:', telegramFileUrl);
+      return telegramFileUrl;
     } else {
-      console.error('IceDrive upload failed:', response.status, response.statusText);
-      const errorText = await response.text();
-      console.error('Error details:', errorText);
+      console.error('❌ Failed to get Telegram file URL:', fileData);
       return null;
     }
     
   } catch (error) {
-    console.error('Error uploading to IceDrive:', error);
+    console.error('❌ Error getting Telegram file URL:', error);
     return null;
   }
 }
 
 // Process receipt with Google Vision OCR and save image
-async function processReceiptOCR(imageBuffer, fileName) {
+async function processReceiptOCR(imageBuffer, fileName, largestPhoto) {
   try {
     // Use Google Vision API for OCR
     const vision = require('@google-cloud/vision');
@@ -204,17 +168,17 @@ async function processReceiptOCR(imageBuffer, fileName) {
       return { text: null, imageUrl: null };
     }
     
-    // Save image to IceDrive
-    const imageUrl = await saveReceiptToIceDrive(buffer, fileName);
+    // Save receipt using Telegram file URL (simpler and reliable)
+    const imageUrl = await saveReceiptToTelegram(largestPhoto);
     
     // Return the full text detected and image URL
     const fullText = detections[0].description;
     console.log('OCR detected text:', fullText);
     
     if (imageUrl) {
-      console.log('Receipt saved to IceDrive:', imageUrl);
+      console.log('✅ Receipt available at:', imageUrl);
     } else {
-      console.log('IceDrive upload failed');
+      console.log('❌ Could not get receipt URL');
     }
     
     return { text: fullText, imageUrl };
@@ -648,10 +612,10 @@ exports.handler = async (event, context) => {
             response += `\n💬 Your notes: "${caption.trim()}" (added to description)`;
           }
           
-          if (ocrResult.imageUrl && ocrResult.imageUrl.startsWith('https://webdav.icedrive.io')) {
-            response += `\n📎 Receipt stored: <a href="${ocrResult.imageUrl}">View in IceDrive</a>`;
+          if (ocrResult.imageUrl && ocrResult.imageUrl.startsWith('https://api.telegram.org')) {
+            response += `\n📎 Receipt stored: <a href="${ocrResult.imageUrl}">View Original</a>`;
           } else if (ocrResult.imageUrl) {
-            response += `\n📎 Receipt saved to IceDrive`;
+            response += `\n📎 Receipt info saved to spreadsheet`;
           }
           
           response += `\n\n📋 Extracted: ${ocrResult.text.substring(0, 60)}...`;
