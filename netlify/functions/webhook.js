@@ -1,6 +1,7 @@
-// netlify/functions/webhook.js - Latest Version with IceDrive Storage
+// netlify/functions/webhook.js - Firebase Storage Version
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
+const admin = require('firebase-admin');
 
 // Environment Variables
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -13,7 +14,33 @@ const GOOGLE_CREDENTIALS = {
   private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n')
 };
 
+// Firebase credentials
+const FIREBASE_CREDENTIALS = {
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET
+};
+
 const STANDARD_DEDUCTION_2025 = 14600;
+
+// Initialize Firebase Admin (only once)
+let firebaseInitialized = false;
+
+function initFirebase() {
+  if (!firebaseInitialized && !admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: FIREBASE_CREDENTIALS.projectId,
+        clientEmail: FIREBASE_CREDENTIALS.clientEmail,
+        privateKey: FIREBASE_CREDENTIALS.privateKey
+      }),
+      storageBucket: FIREBASE_CREDENTIALS.storageBucket
+    });
+    firebaseInitialized = true;
+    console.log('Firebase initialized successfully');
+  }
+}
 
 // Initialize Google Sheets
 async function initGoogleSheet() {
@@ -115,31 +142,44 @@ Your entire response MUST ONLY be a single, valid JSON object. DO NOT include ba
   }
 }
 
-// Save receipt using Telegram file URL (simpler and reliable)
-async function saveReceiptToTelegram(largestPhoto) {
+// Save receipt to Firebase Storage
+async function saveReceiptToFirebase(imageBuffer, fileName) {
   try {
-    console.log('Getting Telegram file URL for:', largestPhoto.file_id);
+    console.log('Uploading receipt to Firebase Storage:', fileName);
     
-    // Get file info from Telegram
-    const fileResponse = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${largestPhoto.file_id}`);
-    const fileData = await fileResponse.json();
+    // Initialize Firebase if not already done
+    initFirebase();
     
-    if (fileData.ok) {
-      const telegramFileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileData.result.file_path}`;
-      console.log('✅ Receipt available at Telegram URL:', telegramFileUrl);
-      return telegramFileUrl;
-    } else {
-      console.error('❌ Failed to get Telegram file URL:', fileData);
-      return null;
-    }
+    const bucket = admin.storage().bucket();
+    const file = bucket.file(`receipts/${fileName}`);
+    
+    // Upload the image buffer
+    await file.save(imageBuffer, {
+      metadata: {
+        contentType: 'image/jpeg',
+        metadata: {
+          uploadedAt: new Date().toISOString(),
+          source: 'telegram-bot'
+        }
+      }
+    });
+    
+    // Make the file publicly accessible
+    await file.makePublic();
+    
+    // Get the public URL
+    const publicUrl = `https://storage.googleapis.com/${FIREBASE_CREDENTIALS.storageBucket}/receipts/${fileName}`;
+    
+    console.log('✅ Receipt uploaded successfully to Firebase:', publicUrl);
+    return publicUrl;
     
   } catch (error) {
-    console.error('❌ Error getting Telegram file URL:', error);
+    console.error('❌ Error uploading to Firebase Storage:', error);
     return null;
   }
 }
 
-// Process receipt with Google Vision OCR and save image
+// Process receipt with Google Vision OCR and save to Firebase
 async function processReceiptOCR(imageBuffer, fileName, largestPhoto) {
   try {
     // Use Google Vision API for OCR
@@ -168,8 +208,8 @@ async function processReceiptOCR(imageBuffer, fileName, largestPhoto) {
       return { text: null, imageUrl: null };
     }
     
-    // Save receipt using Telegram file URL (simpler and reliable)
-    const imageUrl = await saveReceiptToTelegram(largestPhoto);
+    // Save receipt to Firebase Storage
+    const imageUrl = await saveReceiptToFirebase(buffer, fileName);
     
     // Return the full text detected and image URL
     const fullText = detections[0].description;
@@ -178,7 +218,7 @@ async function processReceiptOCR(imageBuffer, fileName, largestPhoto) {
     if (imageUrl) {
       console.log('✅ Receipt available at:', imageUrl);
     } else {
-      console.log('❌ Could not get receipt URL');
+      console.log('❌ Could not upload receipt to Firebase');
     }
     
     return { text: fullText, imageUrl };
@@ -352,7 +392,7 @@ exports.handler = async (event, context) => {
       statusCode: 200,
       headers,
       body: JSON.stringify({
-        status: 'S-Corp Expense Tracker is running on Netlify! 🚀',
+        status: 'S-Corp Expense Tracker with Firebase Storage is running! 🚀',
         timestamp: new Date().toISOString(),
         envCheck: {
           hasTelegramToken: !!TELEGRAM_TOKEN,
@@ -360,6 +400,10 @@ exports.handler = async (event, context) => {
           hasSheetId: !!SHEET_ID,
           hasGoogleEmail: !!GOOGLE_CREDENTIALS.client_email,
           hasGoogleKey: !!GOOGLE_CREDENTIALS.private_key,
+          hasFirebaseProjectId: !!FIREBASE_CREDENTIALS.projectId,
+          hasFirebaseEmail: !!FIREBASE_CREDENTIALS.clientEmail,
+          hasFirebaseKey: !!FIREBASE_CREDENTIALS.privateKey,
+          hasFirebaseBucket: !!FIREBASE_CREDENTIALS.storageBucket,
           authorizedUsers: AUTHORIZED_CHAT_IDS.length
         }
       })
@@ -418,7 +462,7 @@ exports.handler = async (event, context) => {
         `• /edit [#] [new description] - Edit entry\n` +
         `• /note [#] [additional notes] - Add notes\n` +
         `• /ytd - Year-to-date totals\n\n` +
-        `I'll categorize everything for S-Corp tax rules!`
+        `🔥 <b>New:</b> Receipts now stored in Firebase! 🚀`
       );
       return {
         statusCode: 200,
@@ -514,7 +558,7 @@ exports.handler = async (event, context) => {
         captionLength: message.caption ? message.caption.length : 0
       });
       
-      await sendTelegramMessage(chatId, `📸 Processing your receipt${caption ? ' with notes' : ''}...`);
+      await sendTelegramMessage(chatId, `📸 Processing your receipt${caption ? ' with notes' : ''}... 🔥 Uploading to Firebase!`);
       
       try {
         // Get the largest photo
@@ -532,15 +576,9 @@ exports.handler = async (event, context) => {
         const imageResponse = await fetch(fileUrl);
         const imageBuffer = await imageResponse.arrayBuffer();
         
-        // Process with Google Vision OCR and save image
-        const fileName = `receipt-${largestPhoto.file_id}.jpg`;
-        const ocrResult = await processReceiptOCR(imageBuffer, fileName);
-        
-        // Fallback: if IceDrive fails, create a note in spreadsheet
-        if (!ocrResult.imageUrl) {
-          console.log('IceDrive upload failed, saving note instead');
-          ocrResult.imageUrl = `Receipt saved locally: ${fileName}`;
-        }
+        // Process with Google Vision OCR and save to Firebase
+        const fileName = `receipt-${Date.now()}-${largestPhoto.file_id}.jpg`;
+        const ocrResult = await processReceiptOCR(imageBuffer, fileName, largestPhoto);
         
         if (!ocrResult.text) {
           await sendTelegramMessage(chatId, '❌ Could not extract text from receipt. Please try a clearer photo or enter manually.');
@@ -552,7 +590,7 @@ exports.handler = async (event, context) => {
         }
         
         console.log('OCR extracted text:', ocrResult.text);
-        console.log('Receipt storage status:', ocrResult.imageUrl ? 'SUCCESS' : 'FAILED');
+        console.log('Firebase upload status:', ocrResult.imageUrl ? 'SUCCESS' : 'FAILED');
         console.log('Caption provided:', caption);
         
         // Create the description for Claude - include caption in a clear way
@@ -586,12 +624,12 @@ exports.handler = async (event, context) => {
           console.log('No caption to add or caption is empty');
         }
         
-        // Add receipt image URL to expense data
+        // Add Firebase receipt URL to expense data
         if (ocrResult.imageUrl) {
           expenseData.receiptUrl = ocrResult.imageUrl;
-          console.log('Added receipt URL to expense data:', ocrResult.imageUrl);
+          console.log('Added Firebase receipt URL to expense data:', ocrResult.imageUrl);
         } else {
-          console.log('No receipt URL available - Google Drive upload may have failed');
+          console.log('No Firebase receipt URL available - upload may have failed');
           expenseData.receiptUrl = '';
         }
         
@@ -612,10 +650,10 @@ exports.handler = async (event, context) => {
             response += `\n💬 Your notes: "${caption.trim()}" (added to description)`;
           }
           
-          if (ocrResult.imageUrl && ocrResult.imageUrl.startsWith('https://api.telegram.org')) {
-            response += `\n📎 Receipt stored: <a href="${ocrResult.imageUrl}">View Original</a>`;
-          } else if (ocrResult.imageUrl) {
-            response += `\n📎 Receipt info saved to spreadsheet`;
+          if (ocrResult.imageUrl) {
+            response += `\n🔥 <b>Receipt stored in Firebase!</b>\n📎 <a href="${ocrResult.imageUrl}">View Receipt</a>`;
+          } else {
+            response += `\n❌ Receipt upload failed - saved text only`;
           }
           
           response += `\n\n📋 Extracted: ${ocrResult.text.substring(0, 60)}...`;
