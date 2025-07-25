@@ -26,7 +26,7 @@ function initFirebase() {
   if (!firebaseInitialized && !admin.apps.length) {
     admin.initializeApp({
       credential: admin.credential.cert({
-        projectId: 'expense-tracker-scorp', // Your Firebase project ID
+        projectId: 's-corp-expense-tracker', // Your Firebase project ID
         clientEmail: GOOGLE_CREDENTIALS.client_email,
         privateKey: GOOGLE_CREDENTIALS.private_key
       }),
@@ -423,6 +423,8 @@ exports.handler = async (event, context) => {
     }
 
     const chatId = message.chat.id.toString();
+    console.log('🔍 CHAT ID FOR DEBUGGING:', chatId, 'User:', message.from?.first_name || 'Unknown');
+    
     const text = message.text || '';
     const photo = message.photo;
     
